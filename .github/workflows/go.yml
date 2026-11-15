@@ -5,33 +5,58 @@ on:
     branches: [ master ]
   pull_request:
     branches: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-
-  build:
-    name: Build
+  test:
+    name: Test
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-    - name: Set up Go 1.x
-      uses: actions/setup-go@v2
-      with:
-        go-version: '>=1.20.0'
-      id: go
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
 
-    - name: Check out code into the Go module directory
-      uses: actions/checkout@v2
+      - name: Verify module files are tidy
+        run: go mod tidy -diff
 
-    - name: Get dependencies
-      run: |
-        go get -v -t -d ./...
-        if [ -f Gopkg.toml ]; then
-            curl https://raw.githubusercontent.com/golang/dep/master/install.sh | sh
-            dep ensure
-        fi
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::Các file sau chưa được gofmt:"
+            echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
 
-    - name: Build
-      run: go build -v .
+      - name: Vet
+        run: go vet ./...
 
-    - name: Test
-      run: go test -v .
+      - name: Build
+        run: go build ./...
+
+      - name: Test with race
+        run: go test -race -count=1 -covermode atomic -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+      - name: Fuzz (short)
+        run: |
+          go test -run='^$' -fuzz=FuzzUnmarshalDNSMessage -fuzztime=10s . || true
+          go test -run='^$' -fuzz=FuzzUnmarshalMessageBody -fuzztime=10s . || true
+          go test -run='^$' -fuzz=FuzzUnmarshalConfigs -fuzztime=10s . || true
+          go test -run='^$' -fuzz=FuzzDecodeLengthPrefixedSlice -fuzztime=10s . || true
