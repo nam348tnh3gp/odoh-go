@@ -33,7 +33,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/cisco/go-hpke"
+	hpke "github.com/jedisct1/go-hpke-compact"
 )
 
 const (
@@ -201,19 +201,20 @@ func TestConfigsDeserialization(t *testing.T) {
 }
 
 func createDefaultSerializedPublicKey(t *testing.T) []byte {
-	suite, err := hpke.AssembleCipherSuite(ODOH_DEFAULT_KEMID, ODOH_DEFAULT_KDFID, ODOH_DEFAULT_AEADID)
+	suite, err := hpke.NewSuite(ODOH_DEFAULT_KEMID, ODOH_DEFAULT_KDFID, ODOH_DEFAULT_AEADID)
 	if err != nil {
 		t.Fatalf("Failed generating HPKE suite")
 	}
 
-	ikm := make([]byte, suite.KEM.PrivateKeySize())
+	ikm := make([]byte, 32)
 	_, _ = rand.Read(ikm)
-	_, publicKey, err := suite.KEM.DeriveKeyPair(ikm)
+	kp, err := suite.DeterministicKeyPair(ikm)
+	publicKey := kp.PublicKey
 	if err != nil {
 		t.Fatalf("Failed generating public key")
 	}
 
-	return suite.KEM.SerializePublicKey(publicKey)
+	return publicKey
 }
 
 func validateSerializedContents(t *testing.T, configContents ObliviousDoHConfigContents, serializedContents []byte) {
@@ -347,21 +348,22 @@ func TestDNSMessageMarshal(t *testing.T) {
 }
 
 func TestQueryEncryption(t *testing.T) {
-	kemID := hpke.DHKEM_X25519
-	kdfID := hpke.KDF_HKDF_SHA256
-	aeadID := hpke.AEAD_AESGCM128
+	kemID := hpke.KemX25519HkdfSha256
+	kdfID := hpke.KdfHkdfSha256
+	aeadID := hpke.AeadAes128Gcm
 
-	suite, err := hpke.AssembleCipherSuite(kemID, kdfID, aeadID)
+	suite, err := hpke.NewSuite(kemID, kdfID, aeadID)
 	if err != nil {
 		t.Fatalf("[%x, %x, %x] Error looking up ciphersuite: %s", kemID, kdfID, aeadID, err)
 	}
 
-	ikm := make([]byte, suite.KEM.PrivateKeySize())
+	ikm := make([]byte, 32)
 	_, err = rand.Reader.Read(ikm)
 	if err != nil {
 		t.Fatalf("Cannot read random ikm: %s", err)
 	}
-	skR, pkR, err := suite.KEM.DeriveKeyPair(ikm)
+	kp, err := suite.DeterministicKeyPair(ikm)
+	pkR := kp.PublicKey
 	if err != nil {
 		t.Fatalf("[%x, %x, %x] Error generating DH key pair: %s", kemID, kdfID, aeadID, err)
 	}
@@ -370,14 +372,14 @@ func TestQueryEncryption(t *testing.T) {
 		KemID:          kemID,
 		KdfID:          kdfID,
 		AeadID:         aeadID,
-		PublicKeyBytes: suite.KEM.SerializePublicKey(pkR),
+		PublicKeyBytes: pkR,
 	}
 
 	targetConfig := ObliviousDoHConfig{
 		Contents: targetKey,
 	}
 
-	odohKeyPair := ObliviousDoHKeyPair{targetConfig, skR, ikm}
+	odohKeyPair := ObliviousDoHKeyPair{targetConfig, kp, ikm}
 
 	dnsMessage := []byte{0x01, 0x02}
 
@@ -399,27 +401,28 @@ func TestQueryEncryption(t *testing.T) {
 }
 
 func Test_Sender_ODOHQueryEncryption(t *testing.T) {
-	kemID := hpke.DHKEM_P256      // 0x0010
-	kdfID := hpke.KDF_HKDF_SHA256 // 0x0001
-	aeadID := hpke.AEAD_AESGCM128 // 0x0001
+	kemID := hpke.KemX25519HkdfSha256 // 0x0010
+	kdfID := hpke.KdfHkdfSha256       // 0x0001
+	aeadID := hpke.AeadAes128Gcm      // 0x0001
 
-	suite, err := hpke.AssembleCipherSuite(kemID, kdfID, aeadID)
+	suite, err := hpke.NewSuite(kemID, kdfID, aeadID)
 	if err != nil {
 		t.Fatalf("[%x, %x, %x] Error looking up ciphersuite: %s", kemID, kdfID, aeadID, err)
 	}
 
-	responseKey := make([]byte, suite.AEAD.KeySize())
+	responseKey := make([]byte, int(suite.KeyBytes))
 	if _, err := io.ReadFull(rand.Reader, responseKey); err != nil {
 		t.Fatalf("Failed generating random key: %s", err)
 	}
 
-	ikm := make([]byte, suite.KEM.PrivateKeySize())
+	ikm := make([]byte, 32)
 	_, err = rand.Reader.Read(ikm)
 	if err != nil {
 		t.Fatalf("Cannot read random ikm: %s", err)
 	}
 
-	skR, pkR, err := suite.KEM.DeriveKeyPair(ikm)
+	kp, err := suite.DeterministicKeyPair(ikm)
+	pkR := kp.PublicKey
 	if err != nil {
 		t.Fatalf("[%x, %x, %x] Error generating DH key pair: %s", kemID, kdfID, aeadID, err)
 	}
@@ -428,15 +431,15 @@ func Test_Sender_ODOHQueryEncryption(t *testing.T) {
 		KemID:          kemID,
 		KdfID:          kdfID,
 		AeadID:         aeadID,
-		PublicKeyBytes: suite.KEM.SerializePublicKey(pkR),
+		PublicKeyBytes: pkR,
 	}
 
 	targetConfig := ObliviousDoHConfig{
 		Contents: targetKey,
 	}
 
-	odohKeyPair := ObliviousDoHKeyPair{targetConfig, skR, ikm}
-	symmetricKey := make([]byte, suite.AEAD.KeySize())
+	odohKeyPair := ObliviousDoHKeyPair{targetConfig, kp, ikm}
+	symmetricKey := make([]byte, int(suite.KeyBytes))
 	_, err = rand.Read(symmetricKey)
 	if err != nil {
 		t.Fatalf("Cannot read symmetric key: %s", err)
@@ -468,27 +471,28 @@ func TestEncoding(t *testing.T) {
 }
 
 func TestOdohPublicKeyMarshalUnmarshal(t *testing.T) {
-	kemID := hpke.DHKEM_P256      // 0x0010
-	kdfID := hpke.KDF_HKDF_SHA256 // 0x0001
-	aeadID := hpke.AEAD_AESGCM128 // 0x0001
+	kemID := hpke.KemX25519HkdfSha256 // 0x0010
+	kdfID := hpke.KdfHkdfSha256       // 0x0001
+	aeadID := hpke.AeadAes128Gcm      // 0x0001
 
-	suite, err := hpke.AssembleCipherSuite(kemID, kdfID, aeadID)
+	suite, err := hpke.NewSuite(kemID, kdfID, aeadID)
 	if err != nil {
 		t.Fatalf("[%x, %x, %x] Error looking up ciphersuite: %s", kemID, kdfID, aeadID, err)
 	}
 
-	responseKey := make([]byte, suite.AEAD.KeySize())
+	responseKey := make([]byte, int(suite.KeyBytes))
 	if _, err := io.ReadFull(rand.Reader, responseKey); err != nil {
 		t.Fatalf("Failed generating random key: %s", err)
 	}
 
-	ikm := make([]byte, suite.KEM.PrivateKeySize())
+	ikm := make([]byte, 32)
 	_, err = rand.Reader.Read(ikm)
 	if err != nil {
 		t.Fatalf("Cannot read random ikm: %s", err)
 	}
 
-	_, pkR, err := suite.KEM.DeriveKeyPair(ikm)
+	kp, err := suite.DeterministicKeyPair(ikm)
+	pkR := kp.PublicKey
 	if err != nil {
 		t.Fatalf("[%x, %x, %x] Error generating DH key pair: %s", kemID, kdfID, aeadID, err)
 	}
@@ -497,7 +501,7 @@ func TestOdohPublicKeyMarshalUnmarshal(t *testing.T) {
 		KemID:          kemID,
 		KdfID:          kdfID,
 		AeadID:         aeadID,
-		PublicKeyBytes: suite.KEM.SerializePublicKey(pkR),
+		PublicKeyBytes: pkR,
 	}
 
 	serializedPublicKey := targetKey.Marshal()
@@ -525,9 +529,9 @@ func TestOdohPublicKeyMarshalUnmarshal(t *testing.T) {
 
 func TestFixedOdohKeyPairCreation(t *testing.T) {
 	const (
-		kemID  = hpke.DHKEM_X25519
-		kdfID  = hpke.KDF_HKDF_SHA256
-		aeadID = hpke.AEAD_AESGCM128
+		kemID  = hpke.KemX25519HkdfSha256
+		kdfID  = hpke.KdfHkdfSha256
+		aeadID = hpke.AeadAes128Gcm
 	)
 
 	// Fixed 16 byte seed
@@ -552,9 +556,9 @@ func TestFixedOdohKeyPairCreation(t *testing.T) {
 }
 
 func TestSealQueryAndOpenAnswer(t *testing.T) {
-	kemID := hpke.DHKEM_X25519
-	kdfID := hpke.KDF_HKDF_SHA256
-	aeadID := hpke.AEAD_AESGCM128
+	kemID := hpke.KemX25519HkdfSha256
+	kdfID := hpke.KdfHkdfSha256
+	aeadID := hpke.AeadAes128Gcm
 
 	kp, err := CreateKeyPair(kemID, kdfID, aeadID)
 	if err != nil {
@@ -621,7 +625,7 @@ func fatalOnError(t *testing.T, err error, msg string) {
 	realMsg := fmt.Sprintf("%s: %v", msg, err)
 	if err != nil {
 		if t != nil {
-			t.Fatalf(realMsg)
+			t.Fatalf("%s", realMsg)
 		}
 		panic(realMsg)
 	}
@@ -723,9 +727,9 @@ type rawTestVector struct {
 
 type testVector struct {
 	t               *testing.T
-	kem_id          hpke.KEMID
-	kdf_id          hpke.KDFID
-	aead_id         hpke.AEADID
+	kem_id          KEMID
+	kdf_id          KDFID
+	aead_id         AEADID
 	odoh_configs    []byte
 	public_key_seed []byte
 	key_id          []byte
@@ -752,9 +756,9 @@ func (tv *testVector) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	tv.kem_id = hpke.KEMID(raw.KemID)
-	tv.kdf_id = hpke.KDFID(raw.KdfID)
-	tv.aead_id = hpke.AEADID(raw.AeadID)
+	tv.kem_id = KEMID(raw.KemID)
+	tv.kdf_id = KDFID(raw.KdfID)
+	tv.aead_id = AEADID(raw.AeadID)
 	tv.public_key_seed = mustUnhex(tv.t, raw.PublicKeySeed)
 	tv.odoh_configs = mustUnhex(tv.t, raw.Configs)
 	tv.key_id = mustUnhex(tv.t, raw.KeyId)
@@ -833,7 +837,7 @@ func generateTransaction(t *testing.T, kp ObliviousDoHKeyPair, querySize int, qu
 	}
 }
 
-func generateTestVector(t *testing.T, kem_id hpke.KEMID, kdf_id hpke.KDFID, aead_id hpke.AEADID) testVector {
+func generateTestVector(t *testing.T, kem_id KEMID, kdf_id KDFID, aead_id AEADID) testVector {
 	kp, err := CreateKeyPair(kem_id, kdf_id, aead_id)
 	if err != nil {
 		t.Fatalf("Unable to create a Key Pair")
@@ -933,9 +937,9 @@ func verifyTestVectors(t *testing.T, vectorString []byte, subtest bool) {
 
 func TestVectorGenerate(t *testing.T) {
 	// This is the mandatory HPKE ciphersuite
-	supportedKEMs := []hpke.KEMID{hpke.DHKEM_X25519}
-	supportedKDFs := []hpke.KDFID{hpke.KDF_HKDF_SHA256}
-	supportedAEADs := []hpke.AEADID{hpke.AEAD_AESGCM128}
+	supportedKEMs := []KEMID{ODOH_DEFAULT_KEMID}
+	supportedKDFs := []KDFID{ODOH_DEFAULT_KDFID}
+	supportedAEADs := []AEADID{ODOH_DEFAULT_AEADID}
 
 	vectors := make([]testVector, 0)
 	for _, kem_id := range supportedKEMs {

@@ -44,18 +44,18 @@ type (
 )
 
 const (
-	ODOH_VERSION                = uint16(0x0001)
-	ODOH_SECRET_LENGTH          = 32
-	ODOH_PADDING_BYTE           = uint8(0)
-	ODOH_LABEL_KEY_ID           = "odoh key id"
-	ODOH_LABEL_KEY              = "odoh key"
-	ODOH_LABEL_NONCE            = "odoh nonce"
-	ODOH_LABEL_QUERY            = "odoh query"
-	ODOH_LABEL_RESPONSE         = "odoh response"
-	ODOH_DEFAULT_KEMID  KEMID   = hpkecompact.KemX25519HkdfSha256
-	ODOH_DEFAULT_KDFID  KDFID   = hpkecompact.KdfHkdfSha256
-	ODOH_DEFAULT_AEADID AEADID  = hpkecompact.AeadAes128Gcm
-	x25519KeySize               = 32
+	ODOH_VERSION               = uint16(0x0001)
+	ODOH_SECRET_LENGTH         = 32
+	ODOH_PADDING_BYTE          = uint8(0)
+	ODOH_LABEL_KEY_ID          = "odoh key id"
+	ODOH_LABEL_KEY             = "odoh key"
+	ODOH_LABEL_NONCE           = "odoh nonce"
+	ODOH_LABEL_QUERY           = "odoh query"
+	ODOH_LABEL_RESPONSE        = "odoh response"
+	ODOH_DEFAULT_KEMID  KEMID  = hpkecompact.KemX25519HkdfSha256
+	ODOH_DEFAULT_KDFID  KDFID  = hpkecompact.KdfHkdfSha256
+	ODOH_DEFAULT_AEADID AEADID = hpkecompact.AeadAes128Gcm
+	x25519KeySize              = 32
 )
 
 func newSuite(kemID KEMID, kdfID KDFID, aeadID AEADID) (*hpkecompact.Suite, error) {
@@ -502,15 +502,15 @@ func (targetKey ObliviousDoHConfigContents) EncryptQuery(query *ObliviousDNSQuer
 	}
 
 	return ObliviousDNSMessage{
-			KeyID:            keyID,
-			MessageType:      QueryType,
-			EncryptedMessage: concat(enc, ct),
-		}, QueryContext{
-			secret:    secret,
-			suite:     suite,
-			query:     encodedMessage,
-			publicKey: targetKey,
-		}, nil
+		KeyID:            keyID,
+		MessageType:      QueryType,
+		EncryptedMessage: concat(enc, ct),
+	}, QueryContext{
+		secret:    secret,
+		suite:     suite,
+		query:     encodedMessage,
+		publicKey: targetKey,
+	}, nil
 }
 
 func validateMessagePadding(padding []byte) bool {
