@@ -543,8 +543,8 @@ func TestFixedOdohKeyPairCreation(t *testing.T) {
 		aeadID = hpke.AeadAes128Gcm
 	)
 
-	// Fixed 16 byte seed
-	seedHex := "f7c664a7959b2aa02ffa7abb0d2022ab"
+	// Fixed 32-byte seed
+	seedHex := "f7c664a7959b2aa02ffa7abb0d2022abf7c664a7959b2aa02ffa7abb0d2022ab"
 	seed, err := hex.DecodeString(seedHex)
 	if err != nil {
 		t.Fatalf("Unable to decode seed to bytes")

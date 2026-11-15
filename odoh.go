@@ -163,7 +163,8 @@ func UnmarshalObliviousDoHConfigContents(buffer []byte) (ObliviousDoHConfigConte
 		return ObliviousDoHConfigContents{}, errors.New("Invalid HPKE public key bytes")
 	}
 
-	publicKeyBytes := buffer[8 : 8+publicKeyLength]
+	publicKeyBytes := make([]byte, publicKeyLength)
+	copy(publicKeyBytes, buffer[8:8+publicKeyLength])
 
 	var KemID KEMID
 	var KdfID KDFID
@@ -349,6 +350,9 @@ type ObliviousDoHKeyPair struct {
 }
 
 func CreateKeyPairFromSeed(kemID KEMID, kdfID KDFID, aeadID AEADID, ikm []byte) (ObliviousDoHKeyPair, error) {
+	if len(ikm) != x25519KeySize {
+		return ObliviousDoHKeyPair{}, errors.New("invalid seed length")
+	}
 	suite, err := newSuite(kemID, kdfID, aeadID)
 	if err != nil {
 		return ObliviousDoHKeyPair{}, err
@@ -432,6 +436,9 @@ func (c QueryContext) DecryptResponse(message ObliviousDNSMessage) ([]byte, erro
 	}
 	if c.suite == nil {
 		return nil, errors.New("nil query context")
+	}
+	if len(message.EncryptedMessage) < 16 {
+		return nil, errors.New("encrypted response too short")
 	}
 	size := responseNonceSize(c.suite)
 	if len(message.KeyID) != size {

@@ -3,6 +3,8 @@ package odoh
 import (
 	"bytes"
 	"testing"
+
+	hpke "github.com/jedisct1/go-hpke-compact"
 )
 
 // ==================== CODEC ====================
@@ -279,5 +281,173 @@ func TestCipherSuite(t *testing.T) {
 	}
 	if suite == nil {
 		t.Fatal("nil suite")
+	}
+}
+
+// ==================== EXTRA EDGE CASES ====================
+
+func TestKeyIDInvalid(t *testing.T) {
+	c := ObliviousDoHConfigContents{
+		KemID:          0xFFFF,
+		KdfID:          ODOH_DEFAULT_KDFID,
+		AeadID:         ODOH_DEFAULT_AEADID,
+		PublicKeyBytes: make([]byte, 32),
+	}
+	if c.KeyID() != nil {
+		t.Fatal("expected nil KeyID for invalid config")
+	}
+}
+
+func TestSealQueryEmpty(t *testing.T) {
+	kp, err := CreateDefaultKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SealQuery(nil) creates an empty DNS message, which is valid.
+	if _, _, err := SealQuery(nil, kp.Config.Contents); err != nil {
+		t.Fatalf("SealQuery(nil) should not error: %v", err)
+	}
+}
+
+func TestOpenAnswerWrongType(t *testing.T) {
+	var ctx QueryContext
+	msg := ObliviousDNSMessage{MessageType: QueryType}
+	if _, err := ctx.OpenAnswer(msg); err == nil {
+		t.Fatal("expected error for query type")
+	}
+}
+
+func TestCreateKeyPairFromSeedWrongLength(t *testing.T) {
+	if _, err := CreateKeyPairFromSeed(
+		ODOH_DEFAULT_KEMID, ODOH_DEFAULT_KDFID, ODOH_DEFAULT_AEADID,
+		make([]byte, 16),
+	); err == nil {
+		t.Fatal("expected error for 16-byte seed")
+	}
+}
+
+func TestUnmarshalMessageBodyCopiesData(t *testing.T) {
+	// dns length 1, dns "x", padding length 0
+	data := []byte{0x00, 0x01, 'x', 0x00, 0x00}
+	body, err := UnmarshalMessageBody(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[2] = 'X'
+	if body.DnsMessage[0] == 'X' {
+		t.Fatal("message body did not copy data")
+	}
+}
+
+// ==================== COVERAGE BOOST ====================
+
+func TestObliviousDNSMessageBodyMessage(t *testing.T) {
+	body := ObliviousDNSMessageBody{DnsMessage: []byte("dns"), Padding: nil}
+	if !bytes.Equal(body.Message(), []byte("dns")) {
+		t.Fatal("Message() mismatch")
+	}
+}
+
+func TestObliviousDNSMessageType(t *testing.T) {
+	m := ObliviousDNSMessage{MessageType: QueryType}
+	if m.Type() != QueryType {
+		t.Fatal("Type() mismatch")
+	}
+	m = ObliviousDNSMessage{MessageType: ResponseType}
+	if m.Type() != ResponseType {
+		t.Fatal("Type() mismatch")
+	}
+}
+
+func TestCreateObliviousDNSMessage(t *testing.T) {
+	m := CreateObliviousDNSMessage(QueryType, []byte("key"), []byte("enc"))
+	if m.MessageType != QueryType {
+		t.Fatal("MessageType mismatch")
+	}
+	if !bytes.Equal(m.KeyID, []byte("key")) {
+		t.Fatal("KeyID mismatch")
+	}
+	if !bytes.Equal(m.EncryptedMessage, []byte("enc")) {
+		t.Fatal("EncryptedMessage mismatch")
+	}
+}
+
+func TestUnmarshalQueryBodyError(t *testing.T) {
+	if _, err := UnmarshalQueryBody(nil); err == nil {
+		t.Fatal("expected error for nil input")
+	}
+}
+
+func TestUnmarshalResponseBodyError(t *testing.T) {
+	if _, err := UnmarshalResponseBody(nil); err == nil {
+		t.Fatal("expected error for nil input")
+	}
+}
+
+func TestNewSuiteExportOnly(t *testing.T) {
+	if _, err := newSuite(ODOH_DEFAULT_KEMID, ODOH_DEFAULT_KDFID, hpke.AeadExportOnly); err == nil {
+		t.Fatal("expected error for export-only AEAD")
+	}
+}
+
+func TestNewSuiteInvalid(t *testing.T) {
+	if _, err := newSuite(0xFFFF, ODOH_DEFAULT_KDFID, ODOH_DEFAULT_AEADID); err == nil {
+		t.Fatal("expected error for invalid KEM")
+	}
+}
+
+func TestResponseNonceSize(t *testing.T) {
+	suite, err := hpke.NewSuite(ODOH_DEFAULT_KEMID, ODOH_DEFAULT_KDFID, ODOH_DEFAULT_AEADID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	size := responseNonceSize(suite)
+	if size <= 0 {
+		t.Fatal("responseNonceSize should be positive")
+	}
+	// Should be max(KeyBytes, NonceBytes)
+	want := int(suite.KeyBytes)
+	if int(suite.NonceBytes) > want {
+		want = int(suite.NonceBytes)
+	}
+	if size != want {
+		t.Fatalf("responseNonceSize = %d, want %d", size, want)
+	}
+}
+
+func TestDecryptQueryInvalidPadding(t *testing.T) {
+	kp, err := CreateDefaultKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Craft a query with non-zero padding, encrypt it, then try to decrypt.
+	q := CreateObliviousDNSQuery([]byte("dns"), 0)
+	q.Padding = []byte{0x01} // invalid padding (must be zero)
+	msg, _, err := kp.Config.Contents.EncryptQuery(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := kp.DecryptQuery(msg); err == nil {
+		t.Fatal("expected error for invalid padding")
+	}
+}
+
+func TestEncryptResponseNilResponseExplicit(t *testing.T) {
+	kp, err := CreateDefaultKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ctx, err := kp.Config.Contents.EncryptQuery(CreateObliviousDNSQuery([]byte("x"), 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// QueryContext only has DecryptResponse; build ResponseContext manually.
+	rc := ResponseContext{
+		query:  ctx.query,
+		suite:  ctx.suite,
+		secret: ctx.secret,
+	}
+	if _, err := rc.EncryptResponse(nil); err == nil {
+		t.Fatal("expected error for nil response")
 	}
 }
