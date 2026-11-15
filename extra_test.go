@@ -254,3 +254,30 @@ func FuzzDecodeLengthPrefixedSlice(f *testing.F) {
 		_, _, _ = decodeLengthPrefixedSlice(data)
 	})
 }
+
+// ==================== CONFIG CONTENTS ACCESSORS ====================
+
+func TestPublicKey(t *testing.T) {
+	kp, err := CreateDefaultKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk := kp.Config.Contents.PublicKey()
+	if !bytes.Equal(pk, kp.Config.Contents.PublicKeyBytes) {
+		t.Fatal("PublicKey mismatch")
+	}
+}
+
+func TestCipherSuite(t *testing.T) {
+	kp, err := CreateDefaultKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	suite, err := kp.Config.Contents.CipherSuite()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if suite == nil {
+		t.Fatal("nil suite")
+	}
+}
