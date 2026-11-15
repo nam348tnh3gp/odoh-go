@@ -103,11 +103,13 @@ func CreateObliviousDoHConfigContents(kemID KEMID, kdfID KDFID, aeadID AEADID, p
 		return ObliviousDoHConfigContents{}, errors.New("invalid HPKE public key length")
 	}
 
+	pub := make([]byte, len(publicKeyBytes))
+	copy(pub, publicKeyBytes)
 	return ObliviousDoHConfigContents{
 		KemID:          kemID,
 		KdfID:          kdfID,
 		AeadID:         aeadID,
-		PublicKeyBytes: publicKeyBytes,
+		PublicKeyBytes: pub,
 	}, nil
 }
 
@@ -122,7 +124,7 @@ func (k ObliviousDoHConfigContents) KeyID() []byte {
 	binary.BigEndian.PutUint16(identifiers[2:], uint16(k.KdfID))
 	binary.BigEndian.PutUint16(identifiers[4:], uint16(k.AeadID))
 	binary.BigEndian.PutUint16(identifiers[6:], uint16(len(k.PublicKeyBytes)))
-	config := append(identifiers, k.PublicKeyBytes...)
+	config := concat(identifiers, k.PublicKeyBytes)
 
 	// NOTE: go-hpke-compact's Extract takes (secret, salt), the reverse of cisco's (salt, ikm).
 	prk := suite.Extract(config, nil)
@@ -141,8 +143,7 @@ func (k ObliviousDoHConfigContents) Marshal() []byte {
 	binary.BigEndian.PutUint16(identifiers[4:], uint16(k.AeadID))
 	binary.BigEndian.PutUint16(identifiers[6:], uint16(len(k.PublicKeyBytes)))
 
-	response := append(identifiers, k.PublicKeyBytes...)
-	return response
+	return concat(identifiers, k.PublicKeyBytes)
 }
 
 func UnmarshalObliviousDoHConfigContents(buffer []byte) (ObliviousDoHConfigContents, error) {
@@ -157,6 +158,9 @@ func UnmarshalObliviousDoHConfigContents(buffer []byte) (ObliviousDoHConfigConte
 
 	if len(buffer[8:]) < int(publicKeyLength) {
 		return ObliviousDoHConfigContents{}, errors.New("Invalid serialized ObliviousDoHConfigContents")
+	}
+	if publicKeyLength != x25519KeySize {
+		return ObliviousDoHConfigContents{}, errors.New("Invalid HPKE public key bytes")
 	}
 
 	publicKeyBytes := buffer[8 : 8+publicKeyLength]
@@ -260,6 +264,9 @@ func UnmarshalObliviousDoHConfig(buffer []byte) (ObliviousDoHConfig, error) {
 	if !isSupportedConfigVersion(version) {
 		return ObliviousDoHConfig{}, fmt.Errorf("Unsupported version: %04x", version)
 	}
+	if length < 8 {
+		return ObliviousDoHConfig{}, errors.New("ObliviousDoHConfig contents too short")
+	}
 	if len(buffer[4:]) < int(length) {
 		return ObliviousDoHConfig{}, fmt.Errorf("Invalid serialized ObliviousDoHConfig, expected %v bytes, got %v", length, len(buffer[4:]))
 	}
@@ -308,6 +315,9 @@ func UnmarshalObliviousDoHConfigs(buffer []byte) (ObliviousDoHConfigs, error) {
 	offset := uint16(2)
 
 	for {
+		if int(offset)+4 > len(buffer) {
+			break
+		}
 		configVersion, configLength, err := parseConfigHeader(buffer[offset:])
 		if err != nil {
 			return ObliviousDoHConfigs{}, errors.New("Invalid ObliviousDoHConfigs encoding")
@@ -359,10 +369,12 @@ func CreateKeyPairFromSeed(kemID KEMID, kdfID KDFID, aeadID AEADID, ikm []byte) 
 
 	config := CreateObliviousDoHConfig(configContents)
 
+	seed := make([]byte, len(ikm))
+	copy(seed, ikm)
 	return ObliviousDoHKeyPair{
 		Config:    config,
 		secretKey: kp,
-		Seed:      ikm,
+		Seed:      seed,
 	}, nil
 }
 
@@ -391,6 +403,9 @@ type QueryContext struct {
 
 // responseAEAD derives the response AEAD, nonce and AAD (RFC 9230, section 6.2).
 func responseAEAD(suite *hpkecompact.Suite, query, secret, responseNonce []byte) (cipher.AEAD, []byte, []byte, error) {
+	if suite == nil {
+		return nil, nil, nil, errors.New("nil suite")
+	}
 	encodedResponseNonce := encodeLengthPrefixedSlice(responseNonce)
 	salt := concat(query, encodedResponseNonce)
 	// NOTE: Extract takes (secret, salt) in go-hpke-compact.
@@ -415,6 +430,12 @@ func responseAEAD(suite *hpkecompact.Suite, query, secret, responseNonce []byte)
 }
 
 func (c QueryContext) DecryptResponse(message ObliviousDNSMessage) ([]byte, error) {
+	if message.MessageType != ResponseType {
+		return nil, errors.New("message is not a response")
+	}
+	if c.suite == nil {
+		return nil, errors.New("nil query context")
+	}
 	size := responseNonceSize(c.suite)
 	if len(message.KeyID) != size {
 		return nil, fmt.Errorf("Invalid response key ID length: expected %v, got %v", size, len(message.KeyID))
@@ -452,6 +473,12 @@ func (c ResponseContext) encryptResponseWithNonce(response *ObliviousDNSResponse
 }
 
 func (c ResponseContext) EncryptResponse(response *ObliviousDNSResponse) (ObliviousDNSMessage, error) {
+	if c.suite == nil {
+		return ObliviousDNSMessage{}, errors.New("nil response context")
+	}
+	if response == nil {
+		return ObliviousDNSMessage{}, errors.New("nil response")
+	}
 	size := responseNonceSize(c.suite)
 
 	responseNonce := make([]byte, size)
@@ -473,6 +500,9 @@ func queryAAD(keyID []byte) []byte {
 }
 
 func (targetKey ObliviousDoHConfigContents) EncryptQuery(query *ObliviousDNSQuery) (ObliviousDNSMessage, QueryContext, error) {
+	if query == nil {
+		return ObliviousDNSMessage{}, QueryContext{}, errors.New("nil query")
+	}
 	suite, err := newSuite(targetKey.KemID, targetKey.KdfID, targetKey.AeadID)
 	if err != nil {
 		return ObliviousDNSMessage{}, QueryContext{}, err
@@ -531,7 +561,7 @@ func (privateKey ObliviousDoHKeyPair) DecryptQuery(message ObliviousDNSMessage) 
 		return nil, ResponseContext{}, err
 	}
 
-	if len(message.EncryptedMessage) <= x25519KeySize {
+	if len(message.EncryptedMessage) <= x25519KeySize+16 {
 		return nil, ResponseContext{}, errors.New("encrypted message too short")
 	}
 
@@ -591,6 +621,9 @@ func SealQuery(dnsQuery []byte, publicKey ObliviousDoHConfigContents) (Oblivious
 func (c QueryContext) OpenAnswer(message ObliviousDNSMessage) ([]byte, error) {
 	if message.MessageType != ResponseType {
 		return nil, errors.New("message is not a response")
+	}
+	if len(message.EncryptedMessage) == 0 {
+		return nil, errors.New("empty encrypted response")
 	}
 
 	decryptedResponseBytes, err := c.DecryptResponse(message)
