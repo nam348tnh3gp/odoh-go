@@ -27,10 +27,21 @@ import (
 	"fmt"
 )
 
-func encodeLengthPrefixedSlice(slice []byte) []byte {
+func encodeLengthPrefixedSliceChecked(slice []byte) ([]byte, error) {
+	if len(slice) > 0xFFFF {
+		return nil, fmt.Errorf("slice too long: %d > 65535", len(slice))
+	}
 	result := make([]byte, 2)
 	binary.BigEndian.PutUint16(result, uint16(len(slice)))
-	return append(result, slice...)
+	return append(result, slice...), nil
+}
+
+func encodeLengthPrefixedSlice(slice []byte) []byte {
+	out, err := encodeLengthPrefixedSliceChecked(slice)
+	if err != nil {
+		panic(err)
+	}
+	return out
 }
 
 func decodeLengthPrefixedSlice(slice []byte) ([]byte, int, error) {

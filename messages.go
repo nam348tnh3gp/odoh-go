@@ -44,7 +44,7 @@ type ObliviousDNSMessageBody struct {
 }
 
 func (m ObliviousDNSMessageBody) Marshal() []byte {
-	return append(encodeLengthPrefixedSlice(m.DnsMessage), encodeLengthPrefixedSlice(m.Padding)...)
+	return concat(encodeLengthPrefixedSlice(m.DnsMessage), encodeLengthPrefixedSlice(m.Padding))
 }
 
 func UnmarshalMessageBody(data []byte) (ObliviousDNSMessageBody, error) {
@@ -81,8 +81,10 @@ type ObliviousDNSQuery struct {
 }
 
 func CreateObliviousDNSQuery(query []byte, paddingBytes uint16) *ObliviousDNSQuery {
+	q := make([]byte, len(query))
+	copy(q, query)
 	msg := ObliviousDNSMessageBody{
-		DnsMessage: query,
+		DnsMessage: q,
 		Padding:    make([]byte, int(paddingBytes)),
 	}
 	return &ObliviousDNSQuery{
@@ -104,8 +106,10 @@ type ObliviousDNSResponse struct {
 }
 
 func CreateObliviousDNSResponse(response []byte, paddingBytes uint16) *ObliviousDNSResponse {
+	r := make([]byte, len(response))
+	copy(r, response)
 	msg := ObliviousDNSMessageBody{
-		DnsMessage: response,
+		DnsMessage: r,
 		Padding:    make([]byte, int(paddingBytes)),
 	}
 	return &ObliviousDNSResponse{
@@ -149,10 +153,7 @@ func (m ObliviousDNSMessage) Marshal() []byte {
 	encodedKey := encodeLengthPrefixedSlice(m.KeyID)
 	encodedMessage := encodeLengthPrefixedSlice(m.EncryptedMessage)
 
-	result := append([]byte{uint8(m.MessageType)}, encodedKey...)
-	result = append(result, encodedMessage...)
-
-	return result
+	return concat([]byte{uint8(m.MessageType)}, encodedKey, encodedMessage)
 }
 
 func UnmarshalDNSMessage(data []byte) (ObliviousDNSMessage, error) {
@@ -164,6 +165,12 @@ func UnmarshalDNSMessage(data []byte) (ObliviousDNSMessage, error) {
 	keyID, messageOffset, err := decodeLengthPrefixedSlice(data[1:])
 	if err != nil {
 		return ObliviousDNSMessage{}, err
+	}
+	if 1+messageOffset > len(data) {
+		return ObliviousDNSMessage{}, fmt.Errorf("Invalid data length: %d", len(data))
+	}
+	if 1+messageOffset > len(data) {
+		return ObliviousDNSMessage{}, fmt.Errorf("Invalid data length: %d", len(data))
 	}
 	encryptedMessage, _, err := decodeLengthPrefixedSlice(data[1+messageOffset:])
 	if err != nil {

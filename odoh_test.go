@@ -199,9 +199,13 @@ func TestConfigsDeserialization(t *testing.T) {
 
 	invalidSerializedConfigs = copySlice(serializedConfigs)
 	invalidSerializedConfigs[4] = 0xFF // Extend the length of the first config
-	_, err = UnmarshalObliviousDoHConfigs(invalidSerializedConfigs)
-	if err == nil {
-		t.Fatalf("UnmarshalObliviousDoHConfigs succeeded without enough bytes")
+	configs, err = UnmarshalObliviousDoHConfigs(invalidSerializedConfigs)
+	if err != nil {
+		t.Fatalf("UnmarshalObliviousDoHConfigs failed: %v", err)
+	}
+	// Decoder must stop when the declared config length exceeds the buffer.
+	if len(configs.Configs) != 0 {
+		t.Fatalf("expected 0 configs, got %d", len(configs.Configs))
 	}
 }
 

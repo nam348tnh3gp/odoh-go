@@ -237,8 +237,7 @@ func (c ObliviousDoHConfig) Marshal() []byte {
 	binary.BigEndian.PutUint16(buffer[0:], uint16(c.Version))
 	binary.BigEndian.PutUint16(buffer[2:], uint16(len(marshalledConfig)))
 
-	configBytes := append(buffer, marshalledConfig...)
-	return configBytes
+	return concat(buffer, marshalledConfig)
 }
 
 func parseConfigHeader(buffer []byte) (uint16, uint16, error) {
@@ -301,8 +300,7 @@ func (c ObliviousDoHConfigs) Marshal() []byte {
 	buffer := make([]byte, 2)
 	binary.BigEndian.PutUint16(buffer[0:], uint16(len(serializedConfigs)))
 
-	result := append(buffer, serializedConfigs...)
-	return result
+	return concat(buffer, serializedConfigs)
 }
 
 func UnmarshalObliviousDoHConfigs(buffer []byte) (ObliviousDoHConfigs, error) {
@@ -323,9 +321,8 @@ func UnmarshalObliviousDoHConfigs(buffer []byte) (ObliviousDoHConfigs, error) {
 			return ObliviousDoHConfigs{}, errors.New("Invalid ObliviousDoHConfigs encoding")
 		}
 
-		if uint16(len(buffer[offset:])) < configLength {
-			// The configs vector is encoded incorrectly, so discard the whole thing
-			return ObliviousDoHConfigs{}, fmt.Errorf("Invalid serialized ObliviousDoHConfig, expected %v bytes, got %v", length, len(buffer[offset:]))
+		if int(offset)+4+int(configLength) > len(buffer) {
+			break
 		}
 
 		if isSupportedConfigVersion(configVersion) {
