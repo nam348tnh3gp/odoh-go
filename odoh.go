@@ -20,48 +20,87 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+// This version of odoh.go uses github.com/jedisct1/go-hpke-compact instead of
+// github.com/cisco/go-hpke. Only X25519-HKDF-SHA256 is supported as the KEM and
+// HKDF-SHA256 as the KDF (AEAD: AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305).
+
 package odoh
 
 import (
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
 
-	"github.com/cisco/go-hpke"
+	hpkecompact "github.com/jedisct1/go-hpke-compact"
+)
+
+type (
+	KEMID  = hpkecompact.KemID
+	KDFID  = hpkecompact.KdfID
+	AEADID = hpkecompact.AeadID
 )
 
 const (
-	ODOH_VERSION                    = uint16(0x0001)
-	ODOH_SECRET_LENGTH              = 32
-	ODOH_PADDING_BYTE               = uint8(0)
-	ODOH_LABEL_KEY_ID               = "odoh key id"
-	ODOH_LABEL_KEY                  = "odoh key"
-	ODOH_LABEL_NONCE                = "odoh nonce"
-	ODOH_LABEL_QUERY                = "odoh query"
-	ODOH_LABEL_RESPONSE             = "odoh response"
-	ODOH_DEFAULT_KEMID  hpke.KEMID  = hpke.DHKEM_X25519
-	ODOH_DEFAULT_KDFID  hpke.KDFID  = hpke.KDF_HKDF_SHA256
-	ODOH_DEFAULT_AEADID hpke.AEADID = hpke.AEAD_AESGCM128
+	ODOH_VERSION                = uint16(0x0001)
+	ODOH_SECRET_LENGTH          = 32
+	ODOH_PADDING_BYTE           = uint8(0)
+	ODOH_LABEL_KEY_ID           = "odoh key id"
+	ODOH_LABEL_KEY              = "odoh key"
+	ODOH_LABEL_NONCE            = "odoh nonce"
+	ODOH_LABEL_QUERY            = "odoh query"
+	ODOH_LABEL_RESPONSE         = "odoh response"
+	ODOH_DEFAULT_KEMID  KEMID   = hpkecompact.KemX25519HkdfSha256
+	ODOH_DEFAULT_KDFID  KDFID   = hpkecompact.KdfHkdfSha256
+	ODOH_DEFAULT_AEADID AEADID  = hpkecompact.AeadAes128Gcm
+	x25519KeySize               = 32
 )
 
+func newSuite(kemID KEMID, kdfID KDFID, aeadID AEADID) (*hpkecompact.Suite, error) {
+	if aeadID == hpkecompact.AeadExportOnly {
+		return nil, errors.New("export-only AEAD is not supported")
+	}
+	return hpkecompact.NewSuite(kemID, kdfID, aeadID)
+}
+
+// concat always returns a freshly allocated slice, so callers' backing arrays
+// are never modified.
+func concat(parts ...[]byte) []byte {
+	n := 0
+	for _, p := range parts {
+		n += len(p)
+	}
+	out := make([]byte, 0, n)
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
+func responseNonceSize(suite *hpkecompact.Suite) int {
+	n := int(suite.KeyBytes)
+	if m := int(suite.NonceBytes); m > n {
+		n = m
+	}
+	return n
+}
+
 type ObliviousDoHConfigContents struct {
-	KemID          hpke.KEMID
-	KdfID          hpke.KDFID
-	AeadID         hpke.AEADID
+	KemID          KEMID
+	KdfID          KDFID
+	AeadID         AEADID
 	PublicKeyBytes []byte
 }
 
-func CreateObliviousDoHConfigContents(kemID hpke.KEMID, kdfID hpke.KDFID, aeadID hpke.AEADID, publicKeyBytes []byte) (ObliviousDoHConfigContents, error) {
-	suite, err := hpke.AssembleCipherSuite(kemID, kdfID, aeadID)
-	if err != nil {
+func CreateObliviousDoHConfigContents(kemID KEMID, kdfID KDFID, aeadID AEADID, publicKeyBytes []byte) (ObliviousDoHConfigContents, error) {
+	if _, err := newSuite(kemID, kdfID, aeadID); err != nil {
 		return ObliviousDoHConfigContents{}, err
 	}
 
-	_, err = suite.KEM.DeserializePublicKey(publicKeyBytes)
-	if err != nil {
-		return ObliviousDoHConfigContents{}, err
+	if len(publicKeyBytes) != x25519KeySize {
+		return ObliviousDoHConfigContents{}, errors.New("invalid HPKE public key length")
 	}
 
 	return ObliviousDoHConfigContents{
@@ -73,7 +112,7 @@ func CreateObliviousDoHConfigContents(kemID hpke.KEMID, kdfID hpke.KDFID, aeadID
 }
 
 func (k ObliviousDoHConfigContents) KeyID() []byte {
-	suite, err := hpke.AssembleCipherSuite(k.KemID, k.KdfID, k.AeadID)
+	suite, err := newSuite(k.KemID, k.KdfID, k.AeadID)
 	if err != nil {
 		return nil
 	}
@@ -85,8 +124,12 @@ func (k ObliviousDoHConfigContents) KeyID() []byte {
 	binary.BigEndian.PutUint16(identifiers[6:], uint16(len(k.PublicKeyBytes)))
 	config := append(identifiers, k.PublicKeyBytes...)
 
-	prk := suite.KDF.Extract(nil, config)
-	identifier := suite.KDF.Expand(prk, []byte(ODOH_LABEL_KEY_ID), suite.KDF.OutputSize())
+	// NOTE: go-hpke-compact's Extract takes (secret, salt), the reverse of cisco's (salt, ikm).
+	prk := suite.Extract(config, nil)
+	identifier, err := suite.Expand(prk, []byte(ODOH_LABEL_KEY_ID), suite.PrkBytes)
+	if err != nil {
+		return nil
+	}
 
 	return identifier
 }
@@ -118,52 +161,40 @@ func UnmarshalObliviousDoHConfigContents(buffer []byte) (ObliviousDoHConfigConte
 
 	publicKeyBytes := buffer[8 : 8+publicKeyLength]
 
-	var KemID hpke.KEMID
-	var KdfID hpke.KDFID
-	var AeadID hpke.AEADID
+	var KemID KEMID
+	var KdfID KDFID
+	var AeadID AEADID
 
 	switch kemId {
-	case 0x0010:
-		KemID = hpke.DHKEM_P256
-	case 0x0012:
-		KemID = hpke.DHKEM_P521
 	case 0x0020:
-		KemID = hpke.DHKEM_X25519
-	case 0x0021:
-		KemID = hpke.DHKEM_X448
+		KemID = hpkecompact.KemX25519HkdfSha256
 	default:
 		return ObliviousDoHConfigContents{}, fmt.Errorf("Unsupported KEMID: %04x", kemId)
 	}
 
 	switch kdfId {
 	case 0x0001:
-		KdfID = hpke.KDF_HKDF_SHA256
-	case 0x0002:
-		KdfID = hpke.KDF_HKDF_SHA384
-	case 0x0003:
-		KdfID = hpke.KDF_HKDF_SHA512
+		KdfID = hpkecompact.KdfHkdfSha256
 	default:
 		return ObliviousDoHConfigContents{}, fmt.Errorf("Unsupported KDFID: %04x", kdfId)
 	}
 
 	switch aeadId {
 	case 0x0001:
-		AeadID = hpke.AEAD_AESGCM128
+		AeadID = hpkecompact.AeadAes128Gcm
 	case 0x0002:
-		AeadID = hpke.AEAD_AESGCM256
+		AeadID = hpkecompact.AeadAes256Gcm
 	case 0x0003:
-		AeadID = hpke.AEAD_CHACHA20POLY1305
+		AeadID = hpkecompact.AeadChaCha20Poly1305
 	default:
 		return ObliviousDoHConfigContents{}, fmt.Errorf("Unsupported AEADID: %04x", aeadId)
 	}
 
-	suite, err := hpke.AssembleCipherSuite(KemID, KdfID, AeadID)
-	if err != nil {
+	if _, err := newSuite(KemID, KdfID, AeadID); err != nil {
 		return ObliviousDoHConfigContents{}, errors.New("Unsupported HPKE ciphersuite")
 	}
 
-	_, err = suite.KEM.DeserializePublicKey(publicKeyBytes)
-	if err != nil {
+	if len(publicKeyBytes) != x25519KeySize {
 		return ObliviousDoHConfigContents{}, errors.New("Invalid HPKE public key bytes")
 	}
 
@@ -179,8 +210,8 @@ func (k ObliviousDoHConfigContents) PublicKey() []byte {
 	return k.PublicKeyBytes
 }
 
-func (k ObliviousDoHConfigContents) CipherSuite() (hpke.CipherSuite, error) {
-	return hpke.AssembleCipherSuite(k.KemID, k.KdfID, k.AeadID)
+func (k ObliviousDoHConfigContents) CipherSuite() (*hpkecompact.Suite, error) {
+	return newSuite(k.KemID, k.KdfID, k.AeadID)
 }
 
 type ObliviousDoHConfig struct {
@@ -306,22 +337,22 @@ func UnmarshalObliviousDoHConfigs(buffer []byte) (ObliviousDoHConfigs, error) {
 
 type ObliviousDoHKeyPair struct {
 	Config    ObliviousDoHConfig
-	secretKey hpke.KEMPrivateKey
+	secretKey hpkecompact.KeyPair
 	Seed      []byte
 }
 
-func CreateKeyPairFromSeed(kemID hpke.KEMID, kdfID hpke.KDFID, aeadID hpke.AEADID, ikm []byte) (ObliviousDoHKeyPair, error) {
-	suite, err := hpke.AssembleCipherSuite(kemID, kdfID, aeadID)
+func CreateKeyPairFromSeed(kemID KEMID, kdfID KDFID, aeadID AEADID, ikm []byte) (ObliviousDoHKeyPair, error) {
+	suite, err := newSuite(kemID, kdfID, aeadID)
 	if err != nil {
 		return ObliviousDoHKeyPair{}, err
 	}
 
-	sk, pk, err := suite.KEM.DeriveKeyPair(ikm)
+	kp, err := suite.DeterministicKeyPair(ikm)
 	if err != nil {
 		return ObliviousDoHKeyPair{}, err
 	}
 
-	configContents, err := CreateObliviousDoHConfigContents(kemID, kdfID, aeadID, suite.KEM.SerializePublicKey(pk))
+	configContents, err := CreateObliviousDoHConfigContents(kemID, kdfID, aeadID, kp.PublicKey)
 	if err != nil {
 		return ObliviousDoHKeyPair{}, err
 	}
@@ -330,7 +361,7 @@ func CreateKeyPairFromSeed(kemID hpke.KEMID, kdfID hpke.KDFID, aeadID hpke.AEADI
 
 	return ObliviousDoHKeyPair{
 		Config:    config,
-		secretKey: sk,
+		secretKey: kp,
 		Seed:      ikm,
 	}, nil
 }
@@ -339,34 +370,12 @@ func CreateDefaultKeyPairFromSeed(seed []byte) (ObliviousDoHKeyPair, error) {
 	return CreateKeyPairFromSeed(ODOH_DEFAULT_KEMID, ODOH_DEFAULT_KDFID, ODOH_DEFAULT_AEADID, seed)
 }
 
-func CreateKeyPair(kemID hpke.KEMID, kdfID hpke.KDFID, aeadID hpke.AEADID) (ObliviousDoHKeyPair, error) {
-	suite, err := hpke.AssembleCipherSuite(kemID, kdfID, aeadID)
-	if err != nil {
+func CreateKeyPair(kemID KEMID, kdfID KDFID, aeadID AEADID) (ObliviousDoHKeyPair, error) {
+	ikm := make([]byte, x25519KeySize)
+	if _, err := rand.Read(ikm); err != nil {
 		return ObliviousDoHKeyPair{}, err
 	}
-
-	ikm := make([]byte, suite.KEM.PrivateKeySize())
-	_, err = rand.Reader.Read(ikm)
-	if err != nil {
-		return ObliviousDoHKeyPair{}, err
-	}
-	sk, pk, err := suite.KEM.DeriveKeyPair(ikm)
-	if err != nil {
-		return ObliviousDoHKeyPair{}, err
-	}
-
-	configContents, err := CreateObliviousDoHConfigContents(kemID, kdfID, aeadID, suite.KEM.SerializePublicKey(pk))
-	if err != nil {
-		return ObliviousDoHKeyPair{}, err
-	}
-
-	config := CreateObliviousDoHConfig(configContents)
-
-	return ObliviousDoHKeyPair{
-		Config:    config,
-		secretKey: sk,
-		Seed:      ikm,
-	}, nil
+	return CreateKeyPairFromSeed(kemID, kdfID, aeadID, ikm)
 }
 
 func CreateDefaultKeyPair() (ObliviousDoHKeyPair, error) {
@@ -375,55 +384,62 @@ func CreateDefaultKeyPair() (ObliviousDoHKeyPair, error) {
 
 type QueryContext struct {
 	query     []byte
-	suite     hpke.CipherSuite
+	suite     *hpkecompact.Suite
 	secret    []byte
 	publicKey ObliviousDoHConfigContents
 }
 
+// responseAEAD derives the response AEAD, nonce and AAD (RFC 9230, section 6.2).
+func responseAEAD(suite *hpkecompact.Suite, query, secret, responseNonce []byte) (cipher.AEAD, []byte, []byte, error) {
+	encodedResponseNonce := encodeLengthPrefixedSlice(responseNonce)
+	salt := concat(query, encodedResponseNonce)
+	// NOTE: Extract takes (secret, salt) in go-hpke-compact.
+	prk := suite.Extract(secret, salt)
+
+	key, err := suite.Expand(prk, []byte(ODOH_LABEL_KEY), suite.KeyBytes)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	nonce, err := suite.Expand(prk, []byte(ODOH_LABEL_NONCE), suite.NonceBytes)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	aead, err := suite.NewRawCipher(key)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	aad := concat([]byte{byte(ResponseType)}, encodedResponseNonce)
+	return aead, nonce, aad, nil
+}
+
 func (c QueryContext) DecryptResponse(message ObliviousDNSMessage) ([]byte, error) {
-	responseNonceSize := c.suite.AEAD.KeySize()
-	if responseNonceSize < c.suite.AEAD.NonceSize() {
-		responseNonceSize = c.suite.AEAD.NonceSize()
+	size := responseNonceSize(c.suite)
+	if len(message.KeyID) != size {
+		return nil, fmt.Errorf("Invalid response key ID length: expected %v, got %v", size, len(message.KeyID))
 	}
 
-	if len(message.KeyID) != responseNonceSize {
-		return nil, fmt.Errorf("Invalid response key ID length: expected %v, got %v", responseNonceSize, len(message.KeyID))
-	}
-
-	encodedResponseNonce := encodeLengthPrefixedSlice(message.KeyID)
-	salt := append(c.query, encodedResponseNonce...)
-	prk := c.suite.KDF.Extract(salt, c.secret)
-	key := c.suite.KDF.Expand(prk, []byte(ODOH_LABEL_KEY), c.suite.AEAD.KeySize())
-	nonce := c.suite.KDF.Expand(prk, []byte(ODOH_LABEL_NONCE), c.suite.AEAD.NonceSize())
-
-	aead, err := c.suite.AEAD.New(key)
+	aead, nonce, aad, err := responseAEAD(c.suite, c.query, c.secret, message.KeyID)
 	if err != nil {
 		return nil, err
 	}
 
-	aad := append([]byte{byte(ResponseType)}, encodedResponseNonce...)
 	return aead.Open(nil, nonce, message.EncryptedMessage, aad)
 }
 
 type ResponseContext struct {
 	query  []byte
-	suite  hpke.CipherSuite
+	suite  *hpkecompact.Suite
 	secret []byte
 }
 
 func (c ResponseContext) encryptResponseWithNonce(response *ObliviousDNSResponse, responseNonce []byte) (ObliviousDNSMessage, error) {
-	encodedResponseNonce := encodeLengthPrefixedSlice(responseNonce)
-	salt := append(c.query, encodedResponseNonce...)
-	prk := c.suite.KDF.Extract(salt, c.secret)
-	key := c.suite.KDF.Expand(prk, []byte(ODOH_LABEL_KEY), c.suite.AEAD.KeySize())
-	nonce := c.suite.KDF.Expand(prk, []byte(ODOH_LABEL_NONCE), c.suite.AEAD.NonceSize())
-
-	aead, err := c.suite.AEAD.New(key)
+	aead, nonce, aad, err := responseAEAD(c.suite, c.query, c.secret, responseNonce)
 	if err != nil {
 		return ObliviousDNSMessage{}, err
 	}
 
-	aad := append([]byte{byte(ResponseType)}, encodedResponseNonce...)
 	ciphertext := aead.Seal(nil, nonce, response.Marshal(), aad)
 
 	odohMessage := ObliviousDNSMessage{
@@ -436,58 +452,63 @@ func (c ResponseContext) encryptResponseWithNonce(response *ObliviousDNSResponse
 }
 
 func (c ResponseContext) EncryptResponse(response *ObliviousDNSResponse) (ObliviousDNSMessage, error) {
-	responseNonceSize := c.suite.AEAD.KeySize()
-	if responseNonceSize < c.suite.AEAD.NonceSize() {
-		responseNonceSize = c.suite.AEAD.NonceSize()
-	}
+	size := responseNonceSize(c.suite)
 
-	responseNonce := make([]byte, responseNonceSize)
+	responseNonce := make([]byte, size)
 	read, err := rand.Read(responseNonce)
 	if err != nil {
 		return ObliviousDNSMessage{}, err
 	}
-	if read != responseNonceSize {
-		return ObliviousDNSMessage{}, fmt.Errorf("Failed to read %v bytes", responseNonceSize)
+	if read != size {
+		return ObliviousDNSMessage{}, fmt.Errorf("Failed to read %v bytes", size)
 	}
 
 	return c.encryptResponseWithNonce(response, responseNonce)
 }
 
-func (targetKey ObliviousDoHConfigContents) EncryptQuery(query *ObliviousDNSQuery) (ObliviousDNSMessage, QueryContext, error) {
-	suite, err := hpke.AssembleCipherSuite(targetKey.KemID, targetKey.KdfID, targetKey.AeadID)
-	if err != nil {
-		return ObliviousDNSMessage{}, QueryContext{}, err
-	}
-
-	pkR, err := suite.KEM.DeserializePublicKey(targetKey.PublicKeyBytes)
-	if err != nil {
-		return ObliviousDNSMessage{}, QueryContext{}, err
-	}
-
-	enc, ctxI, err := hpke.SetupBaseS(suite, rand.Reader, pkR, []byte(ODOH_LABEL_QUERY))
-	if err != nil {
-		return ObliviousDNSMessage{}, QueryContext{}, err
-	}
-
-	secret := ctxI.Export([]byte(ODOH_LABEL_RESPONSE), suite.AEAD.KeySize())
-
-	keyID := targetKey.KeyID()
+func queryAAD(keyID []byte) []byte {
 	keyIDLength := make([]byte, 2)
 	binary.BigEndian.PutUint16(keyIDLength, uint16(len(keyID)))
-	aad := append([]byte{byte(QueryType)}, keyIDLength...)
-	aad = append(aad, keyID...)
+	return concat([]byte{byte(QueryType)}, keyIDLength, keyID)
+}
+
+func (targetKey ObliviousDoHConfigContents) EncryptQuery(query *ObliviousDNSQuery) (ObliviousDNSMessage, QueryContext, error) {
+	suite, err := newSuite(targetKey.KemID, targetKey.KdfID, targetKey.AeadID)
+	if err != nil {
+		return ObliviousDNSMessage{}, QueryContext{}, err
+	}
+
+	if len(targetKey.PublicKeyBytes) != x25519KeySize {
+		return ObliviousDNSMessage{}, QueryContext{}, errors.New("invalid HPKE public key length")
+	}
+
+	ctxI, enc, err := suite.NewClientContext(targetKey.PublicKeyBytes, []byte(ODOH_LABEL_QUERY), nil)
+	if err != nil {
+		return ObliviousDNSMessage{}, QueryContext{}, err
+	}
+
+	secret, err := ctxI.Export([]byte(ODOH_LABEL_RESPONSE), suite.KeyBytes)
+	if err != nil {
+		return ObliviousDNSMessage{}, QueryContext{}, err
+	}
+
+	keyID := targetKey.KeyID()
+	aad := queryAAD(keyID)
 
 	encodedMessage := query.Marshal()
-	ct := ctxI.Seal(aad, encodedMessage)
+	ct, err := ctxI.EncryptToServer(encodedMessage, aad)
+	if err != nil {
+		return ObliviousDNSMessage{}, QueryContext{}, err
+	}
 
 	return ObliviousDNSMessage{
-			KeyID:            targetKey.KeyID(),
+			KeyID:            keyID,
 			MessageType:      QueryType,
-			EncryptedMessage: append(enc, ct...),
+			EncryptedMessage: concat(enc, ct),
 		}, QueryContext{
 			secret:    secret,
 			suite:     suite,
-			query:     query.Marshal(),
+			query:     encodedMessage,
 			publicKey: targetKey,
 		}, nil
 }
@@ -505,29 +526,35 @@ func (privateKey ObliviousDoHKeyPair) DecryptQuery(message ObliviousDNSMessage) 
 		return nil, ResponseContext{}, errors.New("message is not a query")
 	}
 
-	suite, err := hpke.AssembleCipherSuite(privateKey.Config.Contents.KemID, privateKey.Config.Contents.KdfID, privateKey.Config.Contents.AeadID)
+	suite, err := newSuite(privateKey.Config.Contents.KemID, privateKey.Config.Contents.KdfID, privateKey.Config.Contents.AeadID)
 	if err != nil {
 		return nil, ResponseContext{}, err
 	}
 
-	keySize := suite.KEM.PublicKeySize()
-	enc := message.EncryptedMessage[0:keySize]
-	ct := message.EncryptedMessage[keySize:]
+	if len(message.EncryptedMessage) <= x25519KeySize {
+		return nil, ResponseContext{}, errors.New("encrypted message too short")
+	}
 
-	ctxR, err := hpke.SetupBaseR(suite, privateKey.secretKey, enc, []byte(ODOH_LABEL_QUERY))
+	// IMPORTANT: copy enc into its own slice. go-hpke-compact's decap does
+	// append(enc, serverPublicKey...); if enc were a sub-slice of
+	// message.EncryptedMessage, that append would overwrite the start of the
+	// ciphertext that follows it and decryption would always fail.
+	enc := append([]byte(nil), message.EncryptedMessage[:x25519KeySize]...)
+	ct := message.EncryptedMessage[x25519KeySize:]
+
+	ctxR, err := suite.NewServerContext(enc, privateKey.secretKey, []byte(ODOH_LABEL_QUERY), nil)
 	if err != nil {
 		return nil, ResponseContext{}, err
 	}
 
-	secret := ctxR.Export([]byte(ODOH_LABEL_RESPONSE), suite.AEAD.KeySize())
+	secret, err := ctxR.Export([]byte(ODOH_LABEL_RESPONSE), suite.KeyBytes)
+	if err != nil {
+		return nil, ResponseContext{}, err
+	}
 
-	keyID := privateKey.Config.Contents.KeyID()
-	keyIDLength := make([]byte, 2)
-	binary.BigEndian.PutUint16(keyIDLength, uint16(len(keyID)))
-	aad := append([]byte{byte(QueryType)}, keyIDLength...)
-	aad = append(aad, keyID...)
+	aad := queryAAD(privateKey.Config.Contents.KeyID())
 
-	dnsMessage, err := ctxR.Open(aad, ct)
+	dnsMessage, err := ctxR.DecryptFromClient(ct, aad)
 	if err != nil {
 		return nil, ResponseContext{}, err
 	}
