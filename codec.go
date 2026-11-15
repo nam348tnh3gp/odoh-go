@@ -49,10 +49,10 @@ func decodeLengthPrefixedSlice(slice []byte) ([]byte, int, error) {
 		return nil, 0, fmt.Errorf("Expected at least 2 bytes of length encoded prefix")
 	}
 
-	length := binary.BigEndian.Uint16(slice)
-	if int(2+length) > len(slice) {
+	length := int(binary.BigEndian.Uint16(slice))
+	if 2+length > len(slice) {
 		return nil, 0, fmt.Errorf("Insufficient data. Expected %d, got %d", 2+length, len(slice))
 	}
 
-	return slice[2 : 2+length], int(2 + length), nil
+	return slice[2 : 2+length], 2 + length, nil
 }

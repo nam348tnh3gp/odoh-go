@@ -51,8 +51,8 @@ func UnmarshalMessageBody(data []byte) (ObliviousDNSMessageBody, error) {
 	if len(data) < 2 {
 		return ObliviousDNSMessageBody{}, fmt.Errorf("Invalid DNS message length")
 	}
-	messageLength := binary.BigEndian.Uint16(data)
-	if int(2+messageLength) > len(data) {
+	messageLength := int(binary.BigEndian.Uint16(data))
+	if 2+messageLength > len(data) {
 		return ObliviousDNSMessageBody{}, fmt.Errorf("Invalid DNS message length")
 	}
 	msg := make([]byte, messageLength)
@@ -61,8 +61,8 @@ func UnmarshalMessageBody(data []byte) (ObliviousDNSMessageBody, error) {
 	if len(data) < 2+int(messageLength)+2 {
 		return ObliviousDNSMessageBody{}, fmt.Errorf("Invalid DNS padding length")
 	}
-	paddingLength := binary.BigEndian.Uint16(data[2+messageLength:])
-	if int(2+messageLength+2+paddingLength) > len(data) {
+	paddingLength := int(binary.BigEndian.Uint16(data[2+messageLength:]))
+	if 2+messageLength+2+paddingLength > len(data) {
 		return ObliviousDNSMessageBody{}, fmt.Errorf("Invalid DNS padding length")
 	}
 
