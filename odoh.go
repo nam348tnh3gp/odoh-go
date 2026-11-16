@@ -56,6 +56,11 @@ const (
 	ODOH_DEFAULT_KDFID  KDFID  = hpkecompact.KdfHkdfSha256
 	ODOH_DEFAULT_AEADID AEADID = hpkecompact.AeadAes128Gcm
 	x25519KeySize              = 32
+
+	// maxFieldLen is the largest value a 16-bit length prefix can carry.
+	maxFieldLen = 0xFFFF
+	// aeadTagLen is the tag size of every supported AEAD (AES-GCM, ChaCha20-Poly1305).
+	aeadTagLen = 16
 )
 
 func newSuite(kemID KEMID, kdfID KDFID, aeadID AEADID) (*hpkecompact.Suite, error) {
@@ -77,6 +82,20 @@ func concat(parts ...[]byte) []byte {
 		out = append(out, p...)
 	}
 	return out
+}
+
+// bodyFits reports whether a message body, plus extra bytes added on top of it
+// (AEAD overhead and, for queries, the HPKE encapsulated key), still fits in the
+// 16-bit length prefix of ObliviousDoHMessage.encrypted_message. It lets callers
+// get an error instead of a panic from Marshal().
+func bodyFits(body ObliviousDNSMessageBody, extra int) error {
+	if len(body.DnsMessage) > maxFieldLen || len(body.Padding) > maxFieldLen {
+		return errors.New("dns_message or padding exceeds 65535 bytes")
+	}
+	if 4+len(body.DnsMessage)+len(body.Padding)+extra > maxFieldLen {
+		return errors.New("encrypted message would exceed 65535 bytes")
+	}
+	return nil
 }
 
 func responseNonceSize(suite *hpkecompact.Suite) int {
@@ -310,11 +329,14 @@ func UnmarshalObliviousDoHConfigs(buffer []byte) (ObliviousDoHConfigs, error) {
 	}
 
 	configs := make([]ObliviousDoHConfig, 0)
-	length := binary.BigEndian.Uint16(buffer[0:])
-	offset := uint16(2)
+	// Use int (not uint16) for all offset arithmetic: with uint16, an entry
+	// length of 0xFFFC made `offset += 4 + configLength` wrap to 0 and the loop
+	// never advanced, hanging the caller on bodies larger than 64 KiB.
+	length := int(binary.BigEndian.Uint16(buffer[0:]))
+	offset := 2
 
 	for {
-		if int(offset)+4 > len(buffer) {
+		if offset+4 > len(buffer) {
 			break
 		}
 		configVersion, configLength, err := parseConfigHeader(buffer[offset:])
@@ -322,7 +344,8 @@ func UnmarshalObliviousDoHConfigs(buffer []byte) (ObliviousDoHConfigs, error) {
 			return ObliviousDoHConfigs{}, errors.New("Invalid ObliviousDoHConfigs encoding")
 		}
 
-		if int(offset)+4+int(configLength) > len(buffer) {
+		next := offset + 4 + int(configLength)
+		if next > len(buffer) {
 			break
 		}
 
@@ -333,7 +356,7 @@ func UnmarshalObliviousDoHConfigs(buffer []byte) (ObliviousDoHConfigs, error) {
 			}
 		} // else skip over unsupported versions
 
-		offset += 4 + configLength
+		offset = next
 		if offset >= 2+length {
 			// Stop reading
 			break
@@ -465,6 +488,11 @@ func (c ResponseContext) encryptResponseWithNonce(response *ObliviousDNSResponse
 		return ObliviousDNSMessage{}, err
 	}
 
+	// Return an error instead of letting Marshal() panic on an oversized message.
+	if err := bodyFits(response.ObliviousDNSMessageBody, aead.Overhead()); err != nil {
+		return ObliviousDNSMessage{}, err
+	}
+
 	ciphertext := aead.Seal(nil, nonce, response.Marshal(), aad)
 
 	odohMessage := ObliviousDNSMessage{
@@ -516,6 +544,11 @@ func (targetKey ObliviousDoHConfigContents) EncryptQuery(query *ObliviousDNSQuer
 		return ObliviousDNSMessage{}, QueryContext{}, errors.New("invalid HPKE public key length")
 	}
 
+	// encrypted_message = enc || ciphertext, so account for the encapsulated key too.
+	if err := bodyFits(query.ObliviousDNSMessageBody, x25519KeySize+aeadTagLen); err != nil {
+		return ObliviousDNSMessage{}, QueryContext{}, err
+	}
+
 	ctxI, enc, err := suite.NewClientContext(targetKey.PublicKeyBytes, []byte(ODOH_LABEL_QUERY), nil)
 	if err != nil {
 		return ObliviousDNSMessage{}, QueryContext{}, err
@@ -535,16 +568,18 @@ func (targetKey ObliviousDoHConfigContents) EncryptQuery(query *ObliviousDNSQuer
 		return ObliviousDNSMessage{}, QueryContext{}, err
 	}
 
-	return ObliviousDNSMessage{
+	message := ObliviousDNSMessage{
 		KeyID:            keyID,
 		MessageType:      QueryType,
 		EncryptedMessage: concat(enc, ct),
-	}, QueryContext{
+	}
+	queryContext := QueryContext{
 		secret:    secret,
 		suite:     suite,
 		query:     encodedMessage,
 		publicKey: targetKey,
-	}, nil
+	}
+	return message, queryContext, nil
 }
 
 func validateMessagePadding(padding []byte) bool {
