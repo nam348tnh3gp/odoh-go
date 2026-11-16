@@ -1,6 +1,7 @@
 # odoh-go (fork)
 
 [![Go](https://github.com/nam348tnh3gp/odoh-go/actions/workflows/go.yml/badge.svg)](https://github.com/nam348tnh3gp/odoh-go/actions/workflows/go.yml)
+![coverage](https://img.shields.io/badge/coverage-86.6%25-brightgreen)
 
 This is a fork of [`cloudflare/odoh-go`](https://github.com/cloudflare/odoh-go)
 that uses [`github.com/jedisct1/go-hpke-compact`](https://github.com/jedisct1/go-hpke-compact)
@@ -17,7 +18,7 @@ It implements version `0x0001` of Oblivious DoH ([RFC 9230](https://www.rfc-edit
 ## Status
 
 - Tests: unit tests, fuzz tests and examples (`go test ./...`)
-- Coverage: 86.6% of statements at `v0.0.3` (`go test -cover ./...`)
+- Coverage: 86.6% of statements in the library package at `v0.0.3` (`go test -cover .`); the programs in `examples/` have no tests
 - CI: GitHub Actions (tidy check, gofmt, vet, build, race tests, coverage, short fuzz)
 - Latest tag: `v0.0.3`
 
