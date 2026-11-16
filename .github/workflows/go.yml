@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test:
@@ -17,8 +17,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -60,3 +58,50 @@ jobs:
           go test -run='^$' -fuzz=FuzzUnmarshalMessageBody -fuzztime=10s . || true
           go test -run='^$' -fuzz=FuzzUnmarshalConfigs -fuzztime=10s . || true
           go test -run='^$' -fuzz=FuzzDecodeLengthPrefixedSlice -fuzztime=10s . || true
+
+      - name: Update coverage in README
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/master' && github.actor != 'github-actions[bot]'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | awk '/^total:/ { gsub(/%/, "", $3); print $3 }')
+          if [ -z "$COVERAGE" ]; then
+            echo "::error::Không đọc được coverage từ coverage.out"
+            exit 1
+          fi
+
+          python3 - "$COVERAGE" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          coverage = sys.argv[1]
+          path = pathlib.Path("README.md")
+          content = path.read_text()
+          content, badge_count = re.subn(
+              r"!\[coverage\]\(https://img\.shields\.io/badge/coverage-[^)]+\)",
+              f"![coverage](https://img.shields.io/badge/coverage-{coverage}%25-brightgreen)",
+              content,
+              count=1,
+          )
+          content, status_count = re.subn(
+              r"Coverage: [^\n]*",
+              f"Coverage: {coverage}% of statements in the library package (measured by the latest successful CI run); the programs in `examples/` have no tests",
+              content,
+              count=1,
+          )
+          if badge_count != 1 or status_count != 1:
+              raise SystemExit("Không tìm thấy đúng vị trí badge hoặc dòng coverage trong README")
+          path.write_text(content)
+          PY
+
+          if git diff --quiet -- README.md; then
+            echo "Coverage không đổi; README đã cập nhật."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: update coverage from CI"
+          git push
