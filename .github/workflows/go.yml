@@ -43,8 +43,11 @@ jobs:
       - name: Build
         run: go build ./...
 
-      - name: Test with race
-        run: go test -race -count=1 -covermode atomic -coverprofile=coverage.out ./...
+      - name: Test all packages with race
+        run: go test -race -count=1 ./...
+
+      - name: Measure library coverage
+        run: go test -race -count=1 -covermode atomic -coverprofile=coverage.out .
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4
